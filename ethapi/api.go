@@ -2438,6 +2438,116 @@ func (api *PublicDebugAPI) TraceCall(ctx context.Context, args TransactionArgs, 
 	return api.traceTx(ctx, tx, msg, new(tracers.Context), &block.EvmHeader, statedb, traceConfig, &blockCtx)
 }
 
+func (api *PublicDebugAPI) EventCall(ctx context.Context, args TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, config *TraceCallConfig) (interface{}, error) {
+
+	// If pending block, return error
+	if num, ok := blockNrOrHash.Number(); ok && num == rpc.PendingBlockNumber {
+		return nil, errors.New("tracing on top of pending is not supported")
+	}
+
+	// Get block
+	block, err := getEvmBlockFromNumberOrHash(ctx, blockNrOrHash, api.b)
+	if err != nil {
+		return nil, err
+	}
+
+	var txIndex uint
+	if config != nil && config.TxIndex != nil {
+		txIndex = uint(*config.TxIndex)
+	}
+
+	// Get state
+	_, statedb, err := stateAtTransaction(ctx, block, int(txIndex), api.b)
+	if err != nil {
+		return nil, err
+	}
+	defer statedb.Release()
+
+	blockCtx := getBlockContext(ctx, api.b, &block.EvmHeader)
+	if config != nil && config.BlockOverrides != nil {
+		config.BlockOverrides.apply(&blockCtx)
+	}
+
+	// Apply state overrides
+	if config != nil {
+		if err := config.StateOverrides.Apply(statedb); err != nil {
+			return nil, err
+		}
+	}
+
+	tx, msg, err := getTxAndMessage(&args, block, api.b)
+	if err != nil {
+		return nil, err
+	}
+
+	var traceConfig *tracers.TraceConfig
+	if config != nil {
+		traceConfig = &config.TraceConfig
+	}
+
+	return api.eventTx(ctx, tx, msg, new(tracers.Context), &block.EvmHeader, statedb, traceConfig, &blockCtx)
+}
+
+func (api *PublicDebugAPI) eventTx(ctx context.Context, tx *types.Transaction, message *core.Message, txctx *tracers.Context, blockHeader *evmcore.EvmHeader, statedb state.StateDB, config *tracers.TraceConfig, blockCtx *vm.BlockContext) (*ExecutionEvent, error) {
+	var (
+		err     error
+		timeout = defaultTraceTimeout
+		usedGas uint64
+	)
+	if config == nil {
+		config = &tracers.TraceConfig{}
+	}
+
+	evmconfig := opera.DefaultVMConfig
+	evmconfig.Tracer = nil
+	evmconfig.NoBaseFee = true
+
+	loggingStateDB := evmstore.WrapStateDbWithLogger(statedb, nil)
+
+	vmenv, _, err := api.b.GetEVM(ctx, loggingStateDB, blockHeader, &evmconfig, blockCtx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get EVM for tracing: %w", err)
+	}
+
+	// Define a meaningful timeout of a single transaction trace
+	if config.Timeout != nil {
+		if timeout, err = time.ParseDuration(*config.Timeout); err != nil {
+			return nil, err
+		}
+	}
+	deadlineCtx, cancel := context.WithTimeout(ctx, timeout)
+	go func() {
+		<-deadlineCtx.Done()
+		if errors.Is(deadlineCtx.Err(), context.DeadlineExceeded) {
+			// Stop evm execution. Note cancellation is not necessarily immediate.
+			vmenv.Cancel()
+		}
+	}()
+	defer cancel()
+
+	// Call SetTxContext to clear out the statedb access list
+	loggingStateDB.SetTxContext(txctx.TxHash, txctx.TxIndex)
+
+	// Run the transaction with tracing enabled.
+	receipt, err := evmcore.ApplyTransactionWithEVM(message, api.b.ChainConfig(), new(core.GasPool).AddGas(message.GasLimit), loggingStateDB, blockHeader.Number, txctx.BlockHash, tx, &usedGas, vmenv)
+	if err != nil {
+		return nil, fmt.Errorf("tracing failed: %w", err)
+	}
+
+	res := &ExecutionEvent{
+		Gas:    receipt.GasUsed,
+		Failed: receipt.Status == types.ReceiptStatusFailed,
+		Logs:   receipt.Logs,
+	}
+	return res, nil
+}
+
+type ExecutionEvent struct {
+	Gas    uint64       `json:"gas"`
+	Failed bool         `json:"failed"`
+	Logs   []*types.Log `json:"logs"`
+}
+
 // getEvmBlockFromNumberOrHash returns EvmBlock from block number or block hash
 func getEvmBlockFromNumberOrHash(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash, b Backend) (*evmcore.EvmBlock, error) {
 	var (
