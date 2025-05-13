@@ -2446,112 +2446,15 @@ func (api *PublicDebugAPI) EventCall(ctx context.Context, args TransactionArgs, 
 	}
 	defer statedb.Release()
 
-	blockCtx := getBlockContext(ctx, api.b, header)
+	vmctx := getBlockContext(ctx, api.b, header)
 	if config != nil && config.BlockOverrides != nil {
-		config.BlockOverrides.apply(&blockCtx)
+		config.BlockOverrides.apply(&vmctx)
 	}
-
 	// Apply state overrides
 	if config != nil && config.StateOverrides != nil {
 		if err := config.StateOverrides.Apply(statedb); err != nil {
 			return nil, err
 		}
-	}
-
-	msg, err := args.ToMessage(api.b.RPCGasCap(), header.BaseFee)
-	if err != nil {
-		return nil, err
-	}
-
-	tx := types.NewTx(&types.LegacyTx{
-		To:       msg.To,
-		Nonce:    msg.Nonce,
-		Gas:      msg.GasLimit,
-		GasPrice: msg.GasPrice,
-		Value:    msg.Value,
-		Data:     msg.Data,
-	})
-
-	var traceConfig *tracers.TraceConfig
-	if config != nil {
-		traceConfig = &config.TraceConfig
-	}
-
-	return api.eventTx(ctx, tx, msg, new(tracers.Context), header, statedb, traceConfig, &blockCtx)
-}
-
-func (api *PublicDebugAPI) eventTx(ctx context.Context, tx *types.Transaction, message *core.Message, txctx *tracers.Context, blockHeader *evmcore.EvmHeader, statedb state.StateDB, config *tracers.TraceConfig, blockCtx *vm.BlockContext) (*ExecutionEvent, error) {
-	var (
-		err     error
-		timeout = defaultTraceTimeout
-		usedGas uint64
-	)
-	if config == nil {
-		config = &tracers.TraceConfig{}
-	}
-
-	evmconfig := opera.DefaultVMConfig
-	evmconfig.Tracer = nil
-	evmconfig.NoBaseFee = true
-
-	vmenv, _, err := api.b.GetEVM(ctx, statedb, blockHeader, &evmconfig, blockCtx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get EVM for tracing: %w", err)
-	}
-
-	// Define a meaningful timeout of a single transaction trace
-	if config.Timeout != nil {
-		if timeout, err = time.ParseDuration(*config.Timeout); err != nil {
-			return nil, err
-		}
-	}
-	deadlineCtx, cancel := context.WithTimeout(ctx, timeout)
-	go func() {
-		<-deadlineCtx.Done()
-		if errors.Is(deadlineCtx.Err(), context.DeadlineExceeded) {
-			// Stop evm execution. Note cancellation is not necessarily immediate.
-			vmenv.Cancel()
-		}
-	}()
-	defer cancel()
-
-	log.Info("event call", "txHash", tx.Hash())
-
-	txctx.TxHash = tx.Hash()
-	// Call SetTxContext to clear out the statedb access list
-	statedb.SetTxContext(txctx.TxHash, txctx.TxIndex)
-
-	// Run the transaction with tracing enabled.
-	receipt, err := evmcore.ApplyTransactionWithEVM(message, api.b.ChainConfig(), new(core.GasPool).AddGas(message.GasLimit), statedb, blockHeader.Number, txctx.BlockHash, tx, &usedGas, vmenv)
-	if err != nil {
-		return nil, fmt.Errorf("tracing failed: %w", err)
-	}
-
-	res := &ExecutionEvent{
-		Gas:    receipt.GasUsed,
-		Failed: receipt.Status == types.ReceiptStatusFailed,
-		Logs:   receipt.Logs,
-	}
-	return res, nil
-}
-
-type ExecutionEvent struct {
-	Gas    uint64       `json:"gas"`
-	Failed bool         `json:"failed"`
-	Logs   []*types.Log `json:"logs"`
-}
-
-func (api *PublicDebugAPI) EventCallv2(ctx context.Context, args TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, config *TraceCallConfig) (interface{}, error) {
-	// Get state
-	statedb, header, err := api.b.StateAndHeaderByNumberOrHash(ctx, blockNrOrHash)
-	if err != nil {
-		return nil, err
-	}
-	defer statedb.Release()
-
-	vmctx := getBlockContext(ctx, api.b, header)
-	if config != nil && config.BlockOverrides != nil {
-		config.BlockOverrides.apply(&vmctx)
 	}
 
 	msg, err := args.ToMessage(0, vmctx.BaseFee)
@@ -2561,8 +2464,7 @@ func (api *PublicDebugAPI) EventCallv2(ctx context.Context, args TransactionArgs
 
 	txctx := new(tracers.Context)
 
-	// Run the transaction with tracing enabled.
-	vmenv := vm.NewEVM(vmctx, statedb, api.b.ChainConfig(), vm.Config{Tracer: nil, NoBaseFee: true})
+	vmenv := vm.NewEVM(vmctx, statedb, api.b.ChainConfig(), vm.Config{NoBaseFee: true})
 	statedb.SetTxContext(txctx.TxHash, txctx.TxIndex)
 	result, err := core.ApplyMessage(vmenv, msg, new(core.GasPool).AddGas(msg.GasLimit))
 	if err != nil {
@@ -2575,6 +2477,12 @@ func (api *PublicDebugAPI) EventCallv2(ctx context.Context, args TransactionArgs
 		Logs:   statedb.GetLogs(txctx.TxHash, txctx.BlockHash),
 	}
 	return res, nil
+}
+
+type ExecutionEvent struct {
+	Gas    uint64       `json:"gas"`
+	Failed bool         `json:"failed"`
+	Logs   []*types.Log `json:"logs"`
 }
 
 // getEvmBlockFromNumberOrHash returns EvmBlock from block number or block hash
