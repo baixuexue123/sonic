@@ -2439,53 +2439,45 @@ func (api *PublicDebugAPI) TraceCall(ctx context.Context, args TransactionArgs, 
 }
 
 func (api *PublicDebugAPI) EventCall(ctx context.Context, args TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, config *TraceCallConfig) (interface{}, error) {
-
-	// If pending block, return error
-	if num, ok := blockNrOrHash.Number(); ok && num == rpc.PendingBlockNumber {
-		return nil, errors.New("tracing on top of pending is not supported")
-	}
-
-	// Get block
-	block, err := getEvmBlockFromNumberOrHash(ctx, blockNrOrHash, api.b)
-	if err != nil {
-		return nil, err
-	}
-
-	var txIndex uint
-	if config != nil && config.TxIndex != nil {
-		txIndex = uint(*config.TxIndex)
-	}
-
 	// Get state
-	_, statedb, err := stateAtTransaction(ctx, block, int(txIndex), api.b)
+	statedb, header, err := api.b.StateAndHeaderByNumberOrHash(ctx, blockNrOrHash)
 	if err != nil {
 		return nil, err
 	}
 	defer statedb.Release()
 
-	blockCtx := getBlockContext(ctx, api.b, &block.EvmHeader)
+	blockCtx := getBlockContext(ctx, api.b, header)
 	if config != nil && config.BlockOverrides != nil {
 		config.BlockOverrides.apply(&blockCtx)
 	}
 
 	// Apply state overrides
-	if config != nil {
+	if config != nil && config.StateOverrides != nil {
 		if err := config.StateOverrides.Apply(statedb); err != nil {
 			return nil, err
 		}
 	}
 
-	tx, msg, err := getTxAndMessage(&args, block, api.b)
+	msg, err := args.ToMessage(api.b.RPCGasCap(), header.BaseFee)
 	if err != nil {
 		return nil, err
 	}
+
+	tx := types.NewTx(&types.LegacyTx{
+		To:       msg.To,
+		Nonce:    msg.Nonce,
+		Gas:      msg.GasLimit,
+		GasPrice: msg.GasPrice,
+		Value:    msg.Value,
+		Data:     msg.Data,
+	})
 
 	var traceConfig *tracers.TraceConfig
 	if config != nil {
 		traceConfig = &config.TraceConfig
 	}
 
-	return api.eventTx(ctx, tx, msg, new(tracers.Context), &block.EvmHeader, statedb, traceConfig, &blockCtx)
+	return api.eventTx(ctx, tx, msg, new(tracers.Context), header, statedb, traceConfig, &blockCtx)
 }
 
 func (api *PublicDebugAPI) eventTx(ctx context.Context, tx *types.Transaction, message *core.Message, txctx *tracers.Context, blockHeader *evmcore.EvmHeader, statedb state.StateDB, config *tracers.TraceConfig, blockCtx *vm.BlockContext) (*ExecutionEvent, error) {
@@ -2535,7 +2527,7 @@ func (api *PublicDebugAPI) eventTx(ctx context.Context, tx *types.Transaction, m
 	res := &ExecutionEvent{
 		Gas:    receipt.GasUsed,
 		Failed: receipt.Status == types.ReceiptStatusFailed,
-		Logs:   receipt.Logs,
+		Logs:   statedb.GetLogs(txctx.TxHash, txctx.BlockHash),
 	}
 	return res, nil
 }
