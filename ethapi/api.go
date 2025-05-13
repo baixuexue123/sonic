@@ -2524,7 +2524,8 @@ func (api *PublicDebugAPI) eventTx(ctx context.Context, tx *types.Transaction, m
 		return nil, fmt.Errorf("tracing failed: %w", err)
 	}
 
-	log.Info("event call", "tx", tx.Hash().Hex(), "block", blockHeader.Number, "usedGas", usedGas, "failed", receipt.Status == types.ReceiptStatusFailed)
+	fmt.Println("event call", "tx", tx.Hash(), "receipt.txHash", receipt.TxHash,
+		"block", blockHeader.Number, "usedGas", receipt.GasUsed, "status", receipt.Status)
 
 	res := &ExecutionEvent{
 		Gas:    receipt.GasUsed,
