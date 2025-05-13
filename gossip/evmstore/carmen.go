@@ -2,6 +2,7 @@ package evmstore
 
 import (
 	"bytes"
+	"fmt"
 
 	cc "github.com/0xsoniclabs/carmen/go/common"
 	"github.com/0xsoniclabs/carmen/go/common/amount"
@@ -61,7 +62,7 @@ func (c *CarmenStateDB) AddLog(log *types.Log) {
 
 func (c *CarmenStateDB) GetLogs(txHash common.Hash, blockHash common.Hash) []*types.Log {
 	if txHash != c.txHash {
-		panic("obtaining logs of not-current tx not supported")
+		panic(fmt.Sprintf("obtaining logs of not-current tx(%s) not supported %s", c.txHash, txHash))
 	}
 	carmenLogs := c.db.GetLogs()
 	logs := make([]*types.Log, len(carmenLogs))
