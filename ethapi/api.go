@@ -2515,6 +2515,9 @@ func (api *PublicDebugAPI) eventTx(ctx context.Context, tx *types.Transaction, m
 	}()
 	defer cancel()
 
+	log.Info("event call", "txHash", tx.Hash())
+
+	txctx.TxHash = tx.Hash()
 	// Call SetTxContext to clear out the statedb access list
 	statedb.SetTxContext(txctx.TxHash, txctx.TxIndex)
 
@@ -2524,13 +2527,10 @@ func (api *PublicDebugAPI) eventTx(ctx context.Context, tx *types.Transaction, m
 		return nil, fmt.Errorf("tracing failed: %w", err)
 	}
 
-	fmt.Println("event call", "tx", tx.Hash(), "receipt.txHash", receipt.TxHash,
-		"block", blockHeader.Number, "usedGas", receipt.GasUsed, "status", receipt.Status)
-
 	res := &ExecutionEvent{
 		Gas:    receipt.GasUsed,
 		Failed: receipt.Status == types.ReceiptStatusFailed,
-		Logs:   statedb.GetLogs(txctx.TxHash, txctx.BlockHash),
+		Logs:   receipt.Logs,
 	}
 	return res, nil
 }
