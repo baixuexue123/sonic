@@ -265,6 +265,24 @@ func ProcessParentBlockHash(prevHash common.Hash, evm *vm.EVM) {
 	evm.StateDB.Finalise(true)
 }
 
+func ApplyTransaction(
+	msg *core.Message,
+	gp *core.GasPool,
+	statedb state.StateDB,
+	blockNumber *big.Int,
+	tx *types.Transaction,
+	usedGas *uint64,
+	evm *vm.EVM,
+	onNewLog func(*types.Log),
+) (
+	*types.Receipt,
+	uint64,
+	bool,
+	error,
+) {
+	return applyTransaction(msg, gp, statedb, blockNumber, tx, usedGas, evm, onNewLog)
+}
+
 func applyTransaction(
 	msg *core.Message,
 	gp *core.GasPool,

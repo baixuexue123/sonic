@@ -2541,6 +2541,42 @@ type ExecutionEvent struct {
 	Logs   []*types.Log `json:"logs"`
 }
 
+func (api *PublicDebugAPI) EventCallv2(ctx context.Context, args TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, config *TraceCallConfig) (interface{}, error) {
+	// Get state
+	statedb, header, err := api.b.StateAndHeaderByNumberOrHash(ctx, blockNrOrHash)
+	if err != nil {
+		return nil, err
+	}
+	defer statedb.Release()
+
+	vmctx := getBlockContext(ctx, api.b, header)
+	if config != nil && config.BlockOverrides != nil {
+		config.BlockOverrides.apply(&vmctx)
+	}
+
+	msg, err := args.ToMessage(0, vmctx.BaseFee)
+	if err != nil {
+		return nil, err
+	}
+
+	txctx := new(tracers.Context)
+
+	// Run the transaction with tracing enabled.
+	vmenv := vm.NewEVM(vmctx, statedb, api.b.ChainConfig(), vm.Config{Tracer: nil, NoBaseFee: true})
+	statedb.SetTxContext(txctx.TxHash, txctx.TxIndex)
+	result, err := core.ApplyMessage(vmenv, msg, new(core.GasPool).AddGas(msg.GasLimit))
+	if err != nil {
+		return nil, fmt.Errorf("tracing failed: %w", err)
+	}
+
+	res := &ExecutionEvent{
+		Gas:    result.UsedGas,
+		Failed: result.Failed(),
+		Logs:   statedb.GetLogs(txctx.TxHash, txctx.BlockHash),
+	}
+	return res, nil
+}
+
 // getEvmBlockFromNumberOrHash returns EvmBlock from block number or block hash
 func getEvmBlockFromNumberOrHash(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash, b Backend) (*evmcore.EvmBlock, error) {
 	var (
