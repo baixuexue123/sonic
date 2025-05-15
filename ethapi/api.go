@@ -2462,9 +2462,25 @@ func (api *PublicDebugAPI) EventCall(ctx context.Context, args TransactionArgs, 
 		return nil, err
 	}
 
-	txctx := new(tracers.Context)
-
+	timeout := time.Second
 	vmenv := vm.NewEVM(vmctx, statedb, api.b.ChainConfig(), vm.Config{NoBaseFee: true})
+	// Define a meaningful timeout of a single transaction trace
+	if config != nil && config.Timeout != nil {
+		if timeout, err = time.ParseDuration(*config.Timeout); err != nil {
+			return nil, err
+		}
+	}
+	deadlineCtx, cancel := context.WithTimeout(ctx, timeout)
+	go func() {
+		<-deadlineCtx.Done()
+		if errors.Is(deadlineCtx.Err(), context.DeadlineExceeded) {
+			// Stop evm execution. Note cancellation is not necessarily immediate.
+			vmenv.Cancel()
+		}
+	}()
+	defer cancel()
+
+	txctx := new(tracers.Context)
 	statedb.SetTxContext(txctx.TxHash, txctx.TxIndex)
 	result, err := core.ApplyMessage(vmenv, msg, new(core.GasPool).AddGas(msg.GasLimit))
 	if err != nil {
