@@ -2417,6 +2417,70 @@ func (api *PublicDebugAPI) TraceCall(ctx context.Context, args TransactionArgs, 
 	return api.traceTx(ctx, tx, msg, new(tracers.Context), &block.EvmHeader, statedb, traceConfig, &blockCtx)
 }
 
+func (api *PublicDebugAPI) EventCall(ctx context.Context, args TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, config *TraceCallConfig) (interface{}, error) {
+	// Get state
+	statedb, header, err := api.b.StateAndHeaderByNumberOrHash(ctx, blockNrOrHash)
+	if err != nil {
+		return nil, err
+	}
+	defer statedb.Release()
+
+	vmctx := getBlockContext(ctx, api.b, header)
+	if config != nil && config.BlockOverrides != nil {
+		config.BlockOverrides.apply(&vmctx)
+	}
+	// Apply state overrides
+	if config != nil && config.StateOverrides != nil {
+		if err := config.StateOverrides.Apply(statedb); err != nil {
+			return nil, err
+		}
+	}
+
+	msg, err := args.ToMessage(0, vmctx.BaseFee)
+	if err != nil {
+		return nil, err
+	}
+
+	timeout := time.Second
+	txContext := core.NewEVMTxContext(msg)
+	vmenv := vm.NewEVM(vmctx, txContext, statedb, api.b.ChainConfig(), vm.Config{NoBaseFee: true})
+	// Define a meaningful timeout of a single transaction trace
+	if config != nil && config.Timeout != nil {
+		if timeout, err = time.ParseDuration(*config.Timeout); err != nil {
+			return nil, err
+		}
+	}
+	deadlineCtx, cancel := context.WithTimeout(ctx, timeout)
+	go func() {
+		<-deadlineCtx.Done()
+		if errors.Is(deadlineCtx.Err(), context.DeadlineExceeded) {
+			// Stop evm execution. Note cancellation is not necessarily immediate.
+			vmenv.Cancel()
+		}
+	}()
+	defer cancel()
+
+	txctx := new(tracers.Context)
+	statedb.SetTxContext(txctx.TxHash, txctx.TxIndex)
+	result, err := core.ApplyMessage(vmenv, msg, new(core.GasPool).AddGas(msg.GasLimit))
+	if err != nil {
+		return nil, fmt.Errorf("tracing failed: %w", err)
+	}
+
+	res := &ExecutionEvent{
+		Gas:    result.UsedGas,
+		Failed: result.Failed(),
+		Logs:   statedb.GetLogs(txctx.TxHash, txctx.BlockHash),
+	}
+	return res, nil
+}
+
+type ExecutionEvent struct {
+	Gas    uint64       `json:"gas"`
+	Failed bool         `json:"failed"`
+	Logs   []*types.Log `json:"logs"`
+}
+
 // getEvmBlockFromNumberOrHash returns EvmBlock from block number or block hash
 func getEvmBlockFromNumberOrHash(ctx context.Context, blockNrOrHash rpc.BlockNumberOrHash, b Backend) (*evmcore.EvmBlock, error) {
 	var (
