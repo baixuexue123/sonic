@@ -2429,6 +2429,14 @@ func (api *PublicDebugAPI) EventCall(ctx context.Context, args TransactionArgs, 
 	if config != nil && config.BlockOverrides != nil {
 		config.BlockOverrides.apply(&vmctx)
 	}
+	vmctx.GetHash = func(n uint64) common.Hash {
+		header, err := api.b.HeaderByNumber(ctx, rpc.BlockNumber(int64(n)))
+		if err != nil {
+			return common.Hash{}
+		}
+		return header.Hash
+	}
+
 	// Apply state overrides
 	if config != nil && config.StateOverrides != nil {
 		if err := config.StateOverrides.Apply(statedb); err != nil {
